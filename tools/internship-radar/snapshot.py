@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib,json,re,sys
+import hashlib,json,re,sys,time
 from datetime import datetime,timezone
 from pathlib import Path
 from urllib.parse import urljoin
@@ -52,23 +52,54 @@ def tesla_arrays(data):
         elif isinstance(x,list):
             ds=[v for v in x if isinstance(v,dict)]
             if len(ds)>len(best) and ds and sum(all(k in d for k in ('id','t','y','l')) for d in ds)/len(ds)>.9: best=ds
-            for v in x[:5]: walk(v)
+            for v in x[:8]: walk(v)
     walk(data)
-    if len(best)<500 or not locs: raise SourceError('Tesla schema validation failed')
+    if len(best)<500 or not locs: raise SourceError(f'Tesla schema validation failed (jobs={len(best)}, locations={0 if locs is None else len(locs)})')
     return best,locs
 
+def tesla_state_via_browser():
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.support.ui import WebDriverWait
+    except Exception as e: raise SourceError('selenium unavailable for Tesla browser fallback') from e
+    opts=Options(); opts.add_argument('--headless=new'); opts.add_argument('--no-sandbox'); opts.add_argument('--disable-dev-shm-usage'); opts.add_argument('--disable-gpu'); opts.add_argument('--window-size=1440,1200'); opts.add_argument('--lang=en-US')
+    opts.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36')
+    d=None
+    try:
+        d=webdriver.Chrome(options=opts); d.set_page_load_timeout(45); d.set_script_timeout(45)
+        d.get('https://www.tesla.com/careers/search/?site=US&type=3')
+        WebDriverWait(d,30).until(lambda x: x.execute_script('return document.readyState')=='complete')
+        out=d.execute_async_script("""
+          const cb=arguments[arguments.length-1];
+          fetch('/cua-api/apps/careers/state',{credentials:'include',headers:{'accept':'application/json'}})
+            .then(async r => cb({status:r.status,text:await r.text()}))
+            .catch(e => cb({status:0,text:String(e)}));
+        """)
+        if not isinstance(out,dict) or int(out.get('status',0))!=200: raise SourceError(f"Tesla browser state fetch -> {(out or {}).get('status') if isinstance(out,dict) else 'invalid'}")
+        try:return json.loads(out.get('text',''))
+        except Exception as e: raise SourceError('Tesla browser returned non-JSON state') from e
+    finally:
+        if d is not None:
+            try:d.quit()
+            except Exception:pass
+
 def fetch_tesla(s):
-    u='https://www.tesla.com/cua-api/apps/careers/state'; raw,locs=tesla_arrays(getj(s,u)); jobs=[]; y3=ish=0
+    u='https://www.tesla.com/cua-api/apps/careers/state'; method='direct_json'
+    try:data=getj(s,u)
+    except Exception as direct_err:
+        data=tesla_state_via_browser(); method=f'browser_session_after_{type(direct_err).__name__}'
+    raw,locs=tesla_arrays(data); jobs=[]; y3=ish=0
     for j in raw:
         if int(j.get('y',0) or 0)!=3: continue
         y3+=1; t=str(j.get('t','')).strip(); ish+=intern(t); l=locs.get(str(j.get('l','')),str(j.get('l','')))
         if us(l): jobs.append({'id':str(j['id']),'title':t,'location':l,'season':season(t),'deadline':j.get('pu'),'url':f"https://www.tesla.com/careers/search/job/{j['id']}"})
-    if y3<20 or ish/y3<.45: raise SourceError('Tesla Intern/Apprentice taxonomy changed')
+    if y3<20 or ish/y3<.45: raise SourceError(f'Tesla Intern/Apprentice taxonomy changed (y3={y3}, title_match={ish})')
     jobs=uniq(jobs); ids=[j['id'] for j in jobs]; cohorts={}
     for x in ('Winter/Spring 2027','Spring 2027','Summer 2027','Fall 2026'):
         q=sorted(j['id'] for j in jobs if j['season']==x); cohorts[x]={'count':len(q),'ids':q}
     q=sorted(j['id'] for j in jobs if j['season']=='Fall 2026' and austin(j['location']))
-    return {'source':u,'source_type':'tesla_careers_state','board_total':len(raw),'inventory_scope':'U.S. Intern/Apprentice','inventory_count':len(jobs),'inventory_ids':ids,'inventory_fingerprint':fp(ids),'cohorts':cohorts,'austin_fall_2026':{'count':len(q),'ids':q},'jobs':jobs}
+    return {'source':u,'source_type':'tesla_careers_state','fetch_method':method,'board_total':len(raw),'inventory_scope':'U.S. Intern/Apprentice','inventory_count':len(jobs),'inventory_ids':ids,'inventory_fingerprint':fp(ids),'cohorts':cohorts,'austin_fall_2026':{'count':len(q),'ids':q},'jobs':jobs}
 
 def fetch_gh(s,company,token,optional=False):
     u=f'https://boards-api.greenhouse.io/v1/boards/{token}/jobs'
@@ -77,37 +108,49 @@ def fetch_gh(s,company,token,optional=False):
         if optional:return {'source':u,'available':False,'optional':True}
         raise
     raw=d.get('jobs'); total=int((d.get('meta') or {}).get('total',len(raw or [])))
-    if not isinstance(raw,list) or total!=len(raw): raise SourceError(f'{company} Greenhouse count mismatch')
+    if not isinstance(raw,list) or total!=len(raw): raise SourceError(f'{company} Greenhouse count mismatch raw={0 if raw is None else len(raw)} total={total}')
     board=[]; ints=[]
     for j in raw:
         t=str(j.get('title','')).strip(); l=j.get('location') or {}; l=l.get('name','') if isinstance(l,dict) else str(l)
         x={'id':str(j.get('id','')),'title':t,'location':l,'season':season(t),'url':j.get('absolute_url') or f'https://job-boards.greenhouse.io/{token}/jobs/{j.get("id")}', 'updated_at':j.get('updated_at')}; board.append(x)
         if intern(t): ints.append(x)
-    board=uniq(board); ints=uniq(ints); b=[j['id'] for j in board]; ii=[j['id'] for j in ints]; cohorts={}
+    board=uniq(board); ints=uniq(ints)
+    if len(board)!=total: raise SourceError(f'{company} Greenhouse unique-ID mismatch unique={len(board)} total={total}')
+    b=[j['id'] for j in board]; ii=[j['id'] for j in ints]; cohorts={}
     for x in ('Winter/Spring 2027','Spring 2027','Summer 2027','Fall 2026'):
         q=sorted(j['id'] for j in ints if j['season']==x); cohorts[x]={'count':len(q),'ids':q}
     return {'source':u,'source_type':'greenhouse_job_board_api','board_token':token,'board_total':total,'board_ids':b,'board_fingerprint':fp(b),'inventory_scope':'internship/co-op titles','inventory_count':len(ints),'inventory_ids':ii,'inventory_fingerprint':fp(ii),'cohorts':cohorts,'jobs':ints}
 
-def fetch_blue(s):
-    u='https://blueorigin.wd5.myworkdayjobs.com/wday/cxs/blueorigin/BlueOrigin/jobs'; base='https://blueorigin.wd5.myworkdayjobs.com/en-US/BlueOrigin/'; off=0; total=None; raw=[]
-    while total is None or off<total:
-        d=postj(s,u,{'appliedFacets':{},'limit':20,'offset':off,'searchText':''}); t=int(d.get('total',-1)); page=d.get('jobPostings')
+def blue_pass(s):
+    u='https://blueorigin.wd5.myworkdayjobs.com/wday/cxs/blueorigin/BlueOrigin/jobs'; off=0; expected=None; raw=[]; totals=[]
+    while expected is None or off<expected:
+        d=postj(s,u,{'appliedFacets':{},'limit':20,'offset':off,'searchText':''}); t=int(d.get('total',-1)); page=d.get('jobPostings'); totals.append(t)
         if t<0 or not isinstance(page,list): raise SourceError('Blue Origin Workday schema changed')
-        if total is None: total=t
-        elif t!=total: raise SourceError('Blue Origin total changed during pagination')
-        if not page and off<total: raise SourceError('Blue Origin pagination stalled')
+        if expected is None: expected=t
+        if t!=expected: return None,totals
+        if not page and off<expected: return None,totals
         raw+=page; off+=len(page)
-    jobs=[]
-    for p in raw:
-        text=' '.join(map(str,[p.get('externalPath',''),p.get('title',''),p.get('bulletFields','')])); m=re.search(r'(R\d{4,})',text)
-        if not m: raise SourceError('Blue Origin requisition id missing')
-        t=str(p.get('title','')).strip(); jobs.append({'id':m.group(1),'title':t,'location':str(p.get('locationsText','')),'season':season(t),'url':urljoin(base,str(p.get('externalPath','')).lstrip('/')),'posted_on':p.get('postedOn')})
-    board=uniq(jobs)
-    if len(board)!=(total or 0): raise SourceError(f'Blue Origin count {total} != unique IDs {len(board)}')
-    ints=[j for j in board if intern(j['title'])]; b=[j['id'] for j in board]; ii=[j['id'] for j in ints]; cohorts={}
-    for x in ('Winter/Spring 2027','Spring 2027','Summer 2027','Fall 2026'):
-        q=sorted(j['id'] for j in ints if j['season']==x); cohorts[x]={'count':len(q),'ids':q}
-    return {'source':u,'source_type':'workday_cxs','board_total':total,'board_ids':b,'board_fingerprint':fp(b),'inventory_scope':'internship/co-op titles','inventory_count':len(ints),'inventory_ids':ii,'inventory_fingerprint':fp(ii),'cohorts':cohorts,'jobs':ints}
+    return raw,totals
+
+def fetch_blue(s):
+    u='https://blueorigin.wd5.myworkdayjobs.com/wday/cxs/blueorigin/BlueOrigin/jobs'; base='https://blueorigin.wd5.myworkdayjobs.com/en-US/BlueOrigin/'; last=[]
+    for attempt in range(1,6):
+        raw,totals=blue_pass(s); last=totals
+        if raw is None:
+            time.sleep(.8*attempt); continue
+        total=totals[0] if totals else 0; jobs=[]
+        for p in raw:
+            text=' '.join(map(str,[p.get('externalPath',''),p.get('title',''),p.get('bulletFields','')])); m=re.search(r'(R\d{4,})',text)
+            if not m: raise SourceError('Blue Origin requisition id missing')
+            t=str(p.get('title','')).strip(); jobs.append({'id':m.group(1),'title':t,'location':str(p.get('locationsText','')),'season':season(t),'url':urljoin(base,str(p.get('externalPath','')).lstrip('/')),'posted_on':p.get('postedOn')})
+        board=uniq(jobs)
+        if len(board)!=total:
+            time.sleep(.8*attempt); continue
+        ints=[j for j in board if intern(j['title'])]; b=[j['id'] for j in board]; ii=[j['id'] for j in ints]; cohorts={}
+        for x in ('Winter/Spring 2027','Spring 2027','Summer 2027','Fall 2026'):
+            q=sorted(j['id'] for j in ints if j['season']==x); cohorts[x]={'count':len(q),'ids':q}
+        return {'source':u,'source_type':'workday_cxs','snapshot_attempt':attempt,'board_total':total,'board_ids':b,'board_fingerprint':fp(b),'inventory_scope':'internship/co-op titles','inventory_count':len(ints),'inventory_ids':ii,'inventory_fingerprint':fp(ii),'cohorts':cohorts,'jobs':ints}
+    raise SourceError(f'Blue Origin could not obtain internally consistent pass after 5 attempts; totals={last}')
 
 def fetch_apple(s):
     base='https://jobs.apple.com/en-us/search'; found={}; total=None; stagnant=0
@@ -143,7 +186,7 @@ def main():
     fs={'Tesla':lambda:fetch_tesla(s),'SpaceX':lambda:fetch_gh(s,'SpaceX','spacex'),'Anduril':lambda:fetch_gh(s,'Anduril','andurilindustries'),'Figure':lambda:fetch_gh(s,'Figure','figureai'),'Blue Origin':lambda:fetch_blue(s),'Apple':lambda:fetch_apple(s)}; companies={}; changes={}; status={}
     for n,f in fs.items():
         try:
-            c=f(); c.update({'fetched_at':ts,'source_status':'ok','last_success':ts}); companies[n]=c; changes[n]=delta(old.get(n),c); status[n]={'ok':True,'last_success':ts,'board_total':c.get('board_total'),'inventory_count':c.get('inventory_count'),'inventory_fingerprint':c.get('inventory_fingerprint')}
+            c=f(); c.update({'fetched_at':ts,'source_status':'ok','last_success':ts}); companies[n]=c; changes[n]=delta(old.get(n),c); status[n]={'ok':True,'last_success':ts,'board_total':c.get('board_total'),'inventory_count':c.get('inventory_count'),'inventory_fingerprint':c.get('inventory_fingerprint'),'fetch_method':c.get('fetch_method'),'snapshot_attempt':c.get('snapshot_attempt')}
         except Exception as e:
             if old.get(n): c=dict(old[n]); c.update({'source_status':'error','last_attempt':ts,'source_error':f'{type(e).__name__}: {e}'}); companies[n]=c
             status[n]={'ok':False,'last_success':(old.get(n) or {}).get('last_success'),'last_attempt':ts,'error':f'{type(e).__name__}: {e}'}; changes[n]={'source_error':status[n]['error'],'changes_suppressed':True}
