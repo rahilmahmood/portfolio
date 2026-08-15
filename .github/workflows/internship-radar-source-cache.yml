@@ -24,7 +24,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,14 +36,5 @@ jobs:
         run: python -m unittest discover -s tools/internship-radar/tests -v
       - name: Verify SpaceX Anduril Figure Blue Origin Apple twice
         run: python tools/internship-radar/verify_sources.py
-      - name: Probe Tesla through independent fetch relay
-        run: |
-          python - <<'PY'
-          import requests
-          u='https://r.jina.ai/https://www.tesla.com/cua-api/apps/careers/state'
-          r=requests.get(u,timeout=60,headers={'User-Agent':'Mozilla/5.0'})
-          print('HTTP',r.status_code,'BYTES',len(r.content))
-          print(r.text[:500])
-          if r.status_code != 200 or len(r.content) < 100000:
-              raise SystemExit('Tesla relay probe failed')
-          PY
+      - name: Probe multiple Tesla fetch relays twice
+        run: python tools/internship-radar/tesla_relay_probe.py
