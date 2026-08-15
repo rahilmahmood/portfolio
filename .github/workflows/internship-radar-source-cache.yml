@@ -36,26 +36,22 @@ jobs:
         run: python -m pip install --disable-pip-version-check requests beautifulsoup4
       - name: Unit tests
         run: python -m unittest discover -s tools/internship-radar/tests -v
+      - name: Inspect Blue Origin Workday facets
+        run: |
+          python - <<'PY'
+          import json,requests
+          u='https://blueorigin.wd5.myworkdayjobs.com/wday/cxs/blueorigin/BlueOrigin/jobs'
+          r=requests.post(u,json={'appliedFacets':{},'limit':20,'offset':0,'searchText':''},headers={'User-Agent':'Mozilla/5.0','Content-Type':'application/json'},timeout=30)
+          print('HTTP',r.status_code)
+          d=r.json()
+          print('KEYS',list(d))
+          print('TOTAL',d.get('total'))
+          print('FACETS',json.dumps(d.get('facets'),indent=2)[:30000])
+          PY
       - name: Fetch and reconcile runner-backed inventories
         id: snapshot
         continue-on-error: true
         run: python tools/internship-radar/runner_snapshot.py
-      - name: Probe dedicated repo creation permission
-        id: repo_probe
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh repo view rahilmahmood/internship-radar-source-cache >/dev/null 2>&1; then
-            echo 'Dedicated repo already exists'
-            exit 0
-          fi
-          gh api -X POST user/repos \
-            -f name='internship-radar-source-cache' \
-            -F private=true \
-            -f description='Machine-readable source cache for engineering internship recruiting waves'
-      - name: Report repo probe result
-        run: echo "repo_probe_outcome=${{ steps.repo_probe.outcome }}"
       - name: Fail visibly when any runner source failed
         if: steps.snapshot.outcome != 'success'
         run: exit 1
