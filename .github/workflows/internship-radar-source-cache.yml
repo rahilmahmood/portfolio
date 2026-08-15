@@ -15,20 +15,18 @@ on:
       - '.github/workflows/internship-radar-source-cache.yml'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: internship-radar-source-cache-validation
   cancel-in-progress: false
 
 jobs:
-  snapshot:
+  verify:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -36,12 +34,16 @@ jobs:
         run: python -m pip install --disable-pip-version-check requests beautifulsoup4
       - name: Unit tests
         run: python -m unittest discover -s tools/internship-radar/tests -v
-      - name: Test Blue Origin internship facets
-        run: python tools/internship-radar/blue_facet_probe.py
-      - name: Fetch and reconcile runner-backed inventories
-        id: snapshot
-        continue-on-error: true
-        run: python tools/internship-radar/runner_snapshot.py
-      - name: Fail visibly when any runner source failed
-        if: steps.snapshot.outcome != 'success'
-        run: exit 1
+      - name: Verify SpaceX Anduril Figure Blue Origin Apple twice
+        run: python tools/internship-radar/verify_sources.py
+      - name: Probe Tesla through independent fetch relay
+        run: |
+          python - <<'PY'
+          import requests
+          u='https://r.jina.ai/https://www.tesla.com/cua-api/apps/careers/state'
+          r=requests.get(u,timeout=60,headers={'User-Agent':'Mozilla/5.0'})
+          print('HTTP',r.status_code,'BYTES',len(r.content))
+          print(r.text[:500])
+          if r.status_code != 200 or len(r.content) < 100000:
+              raise SystemExit('Tesla relay probe failed')
+          PY
