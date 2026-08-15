@@ -1,34 +1,32 @@
-name: Tesla Egress Probe
+name: Tesla Dataset Probe
 
 on:
   push:
     branches:
       - agent/internship-radar-source-cache
     paths:
-      - 'tools/internship-radar/tesla_direct_probe.py'
+      - 'tools/internship-radar/tesla_dataset_probe.py'
       - '.github/workflows/tesla-egress-probe.yml'
   pull_request:
     branches:
       - main
     paths:
-      - 'tools/internship-radar/tesla_direct_probe.py'
+      - 'tools/internship-radar/tesla_dataset_probe.py'
       - '.github/workflows/tesla-egress-probe.yml'
 
 permissions:
   contents: read
 
 jobs:
-  tesla-direct:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 6
+  tesla-dataset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Fetch Tesla state twice
-        run: python tools/internship-radar/tesla_direct_probe.py
+      - name: Install hosted-dataset client
+        run: python -m pip install --disable-pip-version-check ats-scrapers pandas
+      - name: Validate hosted Tesla source
+        run: python tools/internship-radar/tesla_dataset_probe.py
