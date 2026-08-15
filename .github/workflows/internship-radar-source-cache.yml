@@ -11,6 +11,12 @@ on:
     paths:
       - 'tools/internship-radar/**'
       - '.github/workflows/internship-radar-source-cache.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'tools/internship-radar/**'
+      - '.github/workflows/internship-radar-source-cache.yml'
 
 permissions:
   contents: write
@@ -39,6 +45,7 @@ jobs:
         continue-on-error: true
         run: python tools/internship-radar/snapshot.py
       - name: Commit source state
+        if: github.event_name != 'pull_request'
         run: |
           if git diff --quiet -- internship-radar-state; then
             echo 'No source-state change'
