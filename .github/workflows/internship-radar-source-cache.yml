@@ -1,12 +1,8 @@
 name: Internship Radar Source Cache
 
 on:
-  schedule:
-    - cron: '25 */6 * * *'
-  workflow_dispatch:
   push:
     branches:
-      - main
       - agent/internship-radar-source-cache
     paths:
       - 'tools/internship-radar/**'
@@ -22,7 +18,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: internship-radar-source-cache
+  group: internship-radar-source-cache-validation
   cancel-in-progress: false
 
 jobs:
@@ -36,26 +32,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install parser dependencies
-        run: python -m pip install --disable-pip-version-check requests beautifulsoup4 selenium
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check requests beautifulsoup4
       - name: Unit tests
         run: python -m unittest discover -s tools/internship-radar/tests -v
-      - name: Fetch and reconcile all six inventories
+      - name: Fetch and reconcile runner-backed inventories
         id: snapshot
         continue-on-error: true
-        run: python tools/internship-radar/snapshot.py
-      - name: Commit source state
-        if: github.event_name != 'pull_request'
+        run: python tools/internship-radar/runner_snapshot.py
+      - name: Probe dedicated repo creation permission
+        id: repo_probe
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if git diff --quiet -- internship-radar-state; then
-            echo 'No source-state change'
+          if gh repo view rahilmahmood/internship-radar-source-cache >/dev/null 2>&1; then
+            echo 'Dedicated repo already exists'
             exit 0
           fi
-          git config user.name 'internship-radar-bot'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add internship-radar-state
-          git commit -m 'Update internship radar source state'
-          git push
-      - name: Fail visibly when any source failed
+          gh api -X POST user/repos \
+            -f name='internship-radar-source-cache' \
+            -F private=true \
+            -f description='Machine-readable source cache for engineering internship recruiting waves'
+      - name: Report repo probe result
+        run: echo "repo_probe_outcome=${{ steps.repo_probe.outcome }}"
+      - name: Fail visibly when any runner source failed
         if: steps.snapshot.outcome != 'success'
         run: exit 1
